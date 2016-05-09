@@ -5,12 +5,12 @@ using System.Runtime.InteropServices;
 // General Information about an assembly is controlled through the following 
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
-[assembly: AssemblyTitle("BrandSupport")]
+[assembly: AssemblyTitle("Uninstall")]
 [assembly: AssemblyDescription("")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany(XenVersions.BRANDING_manufacturer)]
-[assembly: AssemblyProduct("BrandSupport")]
-[assembly: AssemblyCopyright(XenVersions.BRANDING_copyrightBrandSupport)]
+[assembly: AssemblyProduct("Uninstall")]
+[assembly: AssemblyCopyright(XenVersions.BRANDING_copyrightUninstall)]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
@@ -20,7 +20,7 @@ using System.Runtime.InteropServices;
 [assembly: ComVisible(false)]
 
 // The following GUID is for the ID of the typelib if this project is exposed to COM
-[assembly: Guid("77c41c1a-1c62-4c67-951f-e908a8aef0f2")]
+[assembly: Guid("755dde47-2491-476a-aa51-25354b4043b0")]
 
 // Version information for an assembly consists of the following four values:
 //

@@ -24,7 +24,24 @@ namespace InstallAgent
             DEFAULT
         }
 
+        public enum InstallMode
+        {
+            QUIET,
+            PASSIVE,
+            FULL
+        }
+
+        public enum InstallStatus
+        {
+            Installed,
+            Failed,
+            Installing,
+            NeedsReboot,
+        }
+
         public static /* readonly */ RebootType rebootOption;
+        public static readonly InstallMode installMode;
+        public static          InstallStatus installStatus;
         public static readonly string exeDir;
         public static readonly string rootRegKeyName;
 
@@ -32,6 +49,8 @@ namespace InstallAgent
 
         static InstallAgent()
         {
+            Trace.WriteLine("===> InstallAgent cctor");
+
             exeDir = new DirectoryInfo(
                 Assembly.GetExecutingAssembly().Location
             ).Parent.FullName;
@@ -40,9 +59,20 @@ namespace InstallAgent
             // so it needs to be called after it's populated
             rootRegKeyName = Branding.GetString("BRANDING_installAgentRegKey");
 
+            using (RegistryKey rootRK =
+                        Registry.LocalMachine.CreateSubKey(rootRegKeyName))
+            {
+                installMode = (InstallMode)Enum.Parse(
+                    typeof(InstallMode),
+                    (string)rootRK.GetValue("InstallMode"),
+                    true
+                );
+            }
+
             // Just to kick off the static constructor
             // before we start messing with the VM
             VM.GetOtherDriverInstallingOnFirstRun();
+            Trace.WriteLine("<=== InstallAgent cctor");
         }
 
         public InstallAgent()
@@ -78,6 +108,15 @@ namespace InstallAgent
         protected override void OnStop()
         {
             installThread.Join();
+            base.OnStop();
+        }
+
+        protected override void OnShutdown()
+        {
+            Trace.WriteLine("Shutting down");
+            installThread.Join();
+            base.OnShutdown();
+            Trace.WriteLine("Shut down");
         }
 
         public void InstallThreadHandler()
@@ -89,6 +128,8 @@ namespace InstallAgent
             catch (Exception e)
             {
                 Trace.WriteLine(e.ToString());
+                SetInstallStatus(InstallStatus.Failed);
+                this.InstallerDone();
                 throw;
             }
         }
@@ -100,7 +141,7 @@ namespace InstallAgent
                 throw new Exception("WOW64: Do not do that.");
             }
 
-            SetInstallStatus("Installing");
+            SetInstallStatus(InstallStatus.Installing);
 
             if (!Installer.GetFlag(Installer.States.NetworkSettingsSaved))
             {
@@ -137,16 +178,7 @@ namespace InstallAgent
                         "continue after the reboot"
                     );
 
-                    if (rebootOption == RebootType.AUTOREBOOT)
-                    {
-                        TryReboot();
-                    }
-                    else // NOREBOOT
-                    {
-                        VM.SetRebootNeeded();
-                    }
-
-                    return;
+                    goto ExitReboot;
                 }
 
                 // Enumerate the PCI Bus after
@@ -164,26 +196,21 @@ namespace InstallAgent
 
             if (PVDevice.PVDevice.AllFunctioning())
             {
-                VM.UnsetRebootNeeded();
-
-                Helpers.ChangeServiceStartMode(
-                    this.ServiceName,
-                    ServiceStartMode.Manual
-                );
-
-                SetInstallStatus("Installed");
+                Helpers.EnsureBootStartServicesStartAtBoot();
+                SetInstallStatus(InstallStatus.Installed);
+                goto ExitDone;
             }
             else
             {
-                if (rebootOption == RebootType.AUTOREBOOT)
-                {
-                    TryReboot();
-                }
-                else
-                {
-                    VM.SetRebootNeeded();
-                }
+                Helpers.EnsureBootStartServicesStartAtBoot();
+                goto ExitReboot;
             }
+
+        ExitReboot:
+            this.InstallerReboot();
+            return;
+        ExitDone:
+            this.InstallerDone();
         }
 
         private static RebootType GetTrueRebootType(RebootType rt)
@@ -205,14 +232,12 @@ namespace InstallAgent
 
             if (VM.GetOtherDriverInstallingOnFirstRun())
             {
-                timeout = 20; // arbitrarily chosen;
-
                 Trace.WriteLine(
                     "Something was installing before " +
                     "Install Agent's first run."
                 );
 
-                timeout = 20 * 60; // 20 minutes to seconds
+                timeout = 600; // seconds; arbitrarily chosen
             }
             else
             {
@@ -220,13 +245,13 @@ namespace InstallAgent
                     "Will wait until active (if any) PV Tools " +
                     "driver installations have finished"
                 );
-                timeout = CfgMgr32.INFINITE;
+                timeout = Winbase.INFINITE;
             }
 
             return timeout;
         }
 
-        public static void TryReboot()
+        public static bool TryReboot()
         {
             if (VM.AllowedToReboot())
             {
@@ -234,14 +259,21 @@ namespace InstallAgent
                     GetTimeoutToReboot()
                 );
 
+                // 'timeout' arbitrarily set to 30 minutes
+                Helpers.BlockUntilMsiMutexAvailable(new TimeSpan(0, 30, 0));
+
                 VM.IncrementRebootCount();
                 Helpers.Reboot();
+
+                return true;
             }
             else
             {
                 Trace.WriteLine(
                     "VM reached maximum number of allowed reboots"
                 );
+
+                return false;
             }
         }
 
@@ -363,20 +395,37 @@ namespace InstallAgent
             return true;
         }
 
-        private static void SetInstallStatus(string status)
-        // Opens 'XenToolsInstaller' registry keys (both x64/x86)
-        // and writes 'status' to 'InstallStatus'
+        private static void SetInstallStatus(InstallStatus status)
+        // Writes value 'status' to 'rootRegKeyName\InstallStatus'
+        // For backwards compatibility with 3rd party applications,
+        // the same value is also written under the 'XenToolsInstaller'
+        // registry keys (both x64/x86)
         {
             const string SOFTWARE = @"SOFTWARE\";
             const string XTINSTALLER = @"Citrix\XenToolsInstaller";
             const string INSTALLSTATUS = "InstallStatus";
+            string       xenToolsKey;
 
-            string regKey = SOFTWARE + XTINSTALLER;
+            Trace.WriteLine(
+                "Setting \'" + INSTALLSTATUS + "\': \'" + status + "\'"
+            );
 
-            Trace.WriteLine("Setting \'InstallStatus\': \'" + status + "\'");
+            installStatus = status;
+
+            using (RegistryKey rootRK =
+                Registry.LocalMachine.CreateSubKey(rootRegKeyName))
+            {
+                rootRK.SetValue(
+                    INSTALLSTATUS,
+                    status,
+                    RegistryValueKind.String
+                );
+            }
+
+            xenToolsKey = SOFTWARE + XTINSTALLER;
 
             using (RegistryKey rk =
-                Registry.LocalMachine.CreateSubKey(regKey))
+                Registry.LocalMachine.CreateSubKey(xenToolsKey))
             {
                 rk.SetValue(
                     INSTALLSTATUS,
@@ -390,10 +439,10 @@ namespace InstallAgent
                 return;
             }
 
-            regKey = SOFTWARE + @"Wow6432Node\" + XTINSTALLER;
+            xenToolsKey = SOFTWARE + @"Wow6432Node\" + XTINSTALLER;
 
             using (RegistryKey rk =
-                Registry.LocalMachine.CreateSubKey(regKey))
+                Registry.LocalMachine.CreateSubKey(xenToolsKey))
             {
                 rk.SetValue(
                     INSTALLSTATUS,
@@ -401,6 +450,140 @@ namespace InstallAgent
                     RegistryValueKind.String
                 );
             }
+        }
+
+        private static InstallStatus GetInstallStatus()
+        {
+            return installStatus;
+        }
+
+        private static string GetInstallerInitiatorSid()
+        // Gets the Security Identifier (SID)
+        // of the user who ran Setup.exe
+        {
+            string sid;
+
+            using (RegistryKey rootRK =
+                Registry.LocalMachine.CreateSubKey(rootRegKeyName))
+            {
+                sid = (string)rootRK.GetValue("InstallerInitiatorSid");
+            }
+
+            if (String.IsNullOrEmpty(sid))
+            {
+                throw new Exception("InstallerInitiatorSid key is empty");
+            }
+
+            return sid;
+        }
+
+        private static bool InformInstallerInitiator(uint timeout = 0)
+        // Informs the user who ran Setup.exe about the overall
+        // success or failure of the 'InstallAgent'
+        // Returns 'true' if the user was successfully informed;
+        // 'false' otherwise
+        {
+            string text =
+                Branding.GetString("BRANDING_managementName");
+
+            if (installStatus == InstallStatus.Installed)
+            {
+                text += " installed successfully";
+            }
+            else if (installStatus == InstallStatus.Failed)
+            {
+                text += " failed to install";
+            }
+            else
+            {
+                throw new Exception(
+                    "InstallStatus: \'" + installStatus + "\' not supported"
+                );
+            }
+
+            string caption =
+                Branding.GetString("BRANDING_manufacturer") + " " +
+                Branding.GetString("BRANDING_hypervisorProduct") + " " +
+                Branding.GetString("BRANDING_managementName") + " " +
+                "Setup";
+
+            string sid = GetInstallerInitiatorSid();
+
+            WtsApi32.ID resp;
+
+            WtsApi32.WTS_SESSION_INFO[] sessions = Helpers.GetWTSSessions(
+                WtsApi32.WTS_CURRENT_SERVER_HANDLE
+            );
+
+            foreach (WtsApi32.WTS_SESSION_INFO si in sessions)
+            {
+                if (si.State == WtsApi32.WTS_CONNECTSTATE_CLASS.WTSActive &&
+                    sid.Equals(Helpers.GetUserSidFromSessionId(si.SessionID)))
+                {
+                    if (!WtsApi32.WTSSendMessage(
+                            WtsApi32.WTS_CURRENT_SERVER_HANDLE,
+                            si.SessionID,
+                            caption,
+                            (uint)caption.Length * sizeof(Char),
+                            text,
+                            (uint)text.Length * sizeof(Char),
+                            WtsApi32.MB.OK | WtsApi32.MB.ICONINFORMATION,
+                            timeout,
+                            out resp,
+                            false))
+                    {
+                        Win32Error.Set("WTSSendMessage");
+                        throw new Exception(Win32Error.GetFullErrMsg());
+                    }
+
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static void BlockUntilInitiatorNotified()
+        {
+            for (;;)
+            {
+                if (InformInstallerInitiator())
+                {
+                    break;
+                }
+                Thread.Sleep(15000); // 15 seconds
+            }
+        }
+
+        private void InstallerReboot()
+        {
+            if (rebootOption == RebootType.AUTOREBOOT)
+            {
+                if (!TryReboot())
+                {
+                    SetInstallStatus(InstallStatus.Failed);
+                    this.InstallerDone();
+                }
+            }
+            else
+            {
+                SetInstallStatus(InstallStatus.NeedsReboot);
+                VM.IncrementRebootCount();
+            }
+        }
+
+        private void InstallerDone()
+        // Call 'SetInstallStatus()' with 'Installed'
+        // or 'Failed' before calling 'InstallerDone()'
+        {
+            if (installMode == InstallMode.FULL)
+            {
+                BlockUntilInitiatorNotified();
+            }
+
+            Helpers.ChangeServiceStartMode(
+                this.ServiceName,
+                Helpers.ExpandedServiceStartMode.Manual
+            );
         }
     }
 

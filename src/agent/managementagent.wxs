@@ -34,6 +34,7 @@
 
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'
     xmlns:netfx="http://schemas.microsoft.com/wix/NetFxExtension"
+    xmlns:util="http://schemas.microsoft.com/wix/UtilExtension"
     >
 
     <?include verinfo.wxi ?>
@@ -81,10 +82,9 @@
 
    <Icon Id="icon.ico" SourceFile="$(var.RESOURCES_Bitmaps)\$(var.RESOURCE_icon)"/>
    <Property Id="ARPPRODUCTICON" Value="$(var.RESOURCE_icon)" />
-   <Property Id='ARPSYSTEMCOMPONENT' Value='0'/>
     <Property Id="REINSTALLMODE" Value="dmus" />
 
-
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />     
     <UIRef Id="WixUI_InstallDir" />
     <WixVariable Id="WixUIBannerBmp" Value="$(var.RESOURCES_Bitmaps)\BannrBmp.bmp" />
@@ -95,7 +95,8 @@
     <WixVariable Id="WixUIUpIco" Value="$(var.RESOURCES_Bitmaps)\Up.ico" />
 
     <MajorUpgrade
-            AllowDowngrades="yes" />
+        AllowDowngrades="yes" 
+        Schedule="afterInstallInitialize" />
 
     <Upgrade Id='$(var.UpgradeCode)'>
         <UpgradeVersion Minimum='$(var.CurrentMajorVersion).$(var.CurrentMinorVersion).$(var.CurrentBuildVersion)'
@@ -106,10 +107,15 @@
     <Property Id='FORCEINSTALL' Value='0'/>
 
 
-    <Condition Message="A later version of [ProductName] is already installed.  Setup will now exit">
+    <Condition Message="$(var.BRANDING_laterVersion)">
         <![CDATA[((NOT UPGRADINGNEWERVERSION) OR (FORCEINSTALL="1"))]]>
     </Condition>
 
+    <?if $(var.arch)=x86?>
+      <Condition Message="$(var.BRANDING_32BitNotOn64)">
+          <![CDATA[Not VersionNT64]]>
+      </Condition>
+    <?endif?>
     <Property Id="NETFRAMEWORK4XFULL">
         <RegistrySearch Id="NetFramework4xFull" Root="HKLM" 
             Key="Software\Microsoft\NET Framework Setup\NDP\v4\Full"
@@ -142,11 +148,11 @@
             Name="Install"
             Type="raw" />
     </Property>
-    <Condition Message="This version of the $(var.Brand) $(var.Product) $(var.Agent) requires Windows Vista, Windows Server 2008 or Later">
+    <Condition Message="$(var.BRANDING_windowsRequired)">
         <![CDATA[Installed OR (VersionNT>=600)]]>
     </Condition>
     
-    <Condition Message="Microsoft .Net Framework Version 3.5 or 4 is required">
+    <Condition Message="$(var.BRANDING_errDotNetNeeded)">
         <![CDATA[Installed OR (( NETFRAMEWORK4XFULL OR NETFRAMEWORK4XCLIENT) OR NETFRAMEWORKX35 )]]>
     </Condition>
 
@@ -179,20 +185,65 @@
                   Property="HOSTTIME"
                   Value="[HOSTTIME64]"
                   Execute="firstSequence" />
+	<CustomAction Id="RegisterUpdateTask"
+				  FileKey="ManagementAgentUpdaterExe"
+				  ExeCommand="add"
+				  Execute="deferred"
+				  Impersonate="no"
+				  Return="ignore" />
+	<CustomAction Id="DeregisterUpdateTask"
+				  FileKey="ManagementAgentUpdaterExe"
+				  ExeCommand="remove"
+				  Execute="deferred"
+				  Impersonate="no"
+				  Return="ignore" />
 
 
     <CustomAction Id="SetREBOOTOPTION" Property="REBOOTOPTION" Value="DEFAULT" />
     <CustomAction Id="RebootOptionForce" Property="REBOOTOPTION" Value="AUTOREBOOT" />
+    <CustomAction Id="RebootOptionForceDisableForce" Property="REBOOT" Value="ReallySuppress" />
     <CustomAction Id="RebootOptionNone" Property="REBOOTOPTION"  Value="NOREBOOT" />
 
-    <InstallExecuteSequence>
+    <CustomAction Id="SetINSTALLMODE" Property="INSTALLMODE" Value="FULL" />
+    <CustomAction Id="InstallModeQuiet" Property="INSTALLMODE" Value="QUIET" />
+    <CustomAction Id="InstallModePassive" Property="INSTALLMODE" Value="PASSIVE" />
+    <Property Id="QtExecCmdLine" Value="&quot;[SystemFolder]\net.exe&quot; stop $(var.BRANDING_guestServiceShort)" />
+    <CustomAction Id="StopServ" BinaryKey="WixCA" DllEntry="CAQuietExec" Execute="immediate" Impersonate="no" Return="ignore" />
+
+    <Binary Id="ManagementAgentCA"
+            SourceFile="Libraries\ManagementAgentCA.dll" />
+
+    <Property Id="INITIATORSID" Secure="yes" />
+
+    <CustomAction Id="SetINITIATORSID"
+                  BinaryKey="ManagementAgentCA"
+                  DllEntry="SetInitiatorSidProperty"
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="check" />
+
+    <CustomAction Id="UninstallExe"
+                  FileKey="UninstallerExe"
+                  Execute="deferred"
+                  ExeCommand = ""
+                  Impersonate="no"
+                  Return="ignore" />
+
+        <InstallExecuteSequence>
         <Custom Action="SaveCmdLineHosttime" Before="AppSearch"/>
         <Custom Action="SetFromHosttime64" After="AppSearch">
             ((NOT HOSTTIME64="") AND (NOT CMDLINE_HOSTTIME))
         </Custom>
+        <Custom Action="StopServ" Before="InstallInitialize"/>
         <Custom Action="SetFromCmdLineHosttime" After="AppSearch">
             CMDLINE_HOSTTIME
         </Custom>
+		 <Custom Action="DeregisterUpdateTask" Before="RemoveFiles">
+			Installed
+		 </Custom>
+		 <Custom Action="RegisterUpdateTask" After="InstallFiles">
+			NOT Installed
+		 </Custom>
         <Custom Action="SetREBOOTOPTION" Before="WriteRegistryValues" />
         <Custom Action="RebootOptionForce" After="SetREBOOTOPTION">
             REBOOT="Force"
@@ -200,21 +251,44 @@
         <Custom Action="RebootOptionNone" After="SetREBOOTOPTION">
             REBOOT="Suppress" OR REBOOT="ReallySuppress"
         </Custom>
+        <Custom Action="RebootOptionForceDisableForce" After="RebootOptionNone">
+            REBOOT="Force"
+        </Custom>
+        <Custom Action="SetINSTALLMODE" Before="WriteRegistryValues" />
+        <Custom Action="InstallModeQuiet" After="SetINSTALLMODE">
+            UILevel=2
+        </Custom>
+        <Custom Action="InstallModePassive" After="SetINSTALLMODE">
+            UILevel=3 OR UILevel=4
+        </Custom>
+        <Custom Action="SetINITIATORSID" Before="WriteRegistryValues" />
+        <Custom Action="UninstallExe" Before="RemoveFiles">
+            (NOT UPGRADINGPRODUCTCODE) AND (REMOVE="ALL")
+        </Custom>
+        <ScheduleReboot After="InstallFinalize">
+            (NOT UPGRADINGPRODUCTCODE) AND (REMOVE="ALL")
+        </ScheduleReboot>
     </InstallExecuteSequence>
 
 
 
     <Media Id='1' Cabinet='ManagementAgentInstaller.cab' EmbedCab='yes' />
     <Directory Id='TARGETDIR' Name='SourceDir'>
+      <Directory Id="SystemFolder" Name="SystemFolder" />
       <Directory Id='$(var.pf)'>
         <Directory Id='Citrix' Name='$(var.BRANDING_manufacturer)'>
           <Directory Id='INSTALLDIR' Name='$(var.BRANDING_shortTools)'>
             <Directory Id='BRANDING' Name='Branding'>
                 <Component Id="BrandingCpy" Guid='*'>
-                    <File Id="BrandSatDll" Name='brandsat.dll' DiskId='1' Source='proj\brandsat.dll' />
+                    <File Id="BrandSatDll" Name='brandsat.dll' DiskId='1' Source='BrandSupport\brandsat.dll' />
                 </Component>
                 <Component Id="BrandingSup" Guid='*'>
                     <File Id="BrandSupportDll" Name="BrandSupport.dll" DiskId='1' Source='BrandSupport\BrandSupport.dll' />
+                </Component>
+            </Directory>
+            <Directory Id="diagnostics" Name="diagnostics">
+                <Component Id="xtbugtool" Guid="*">
+                    <File Id="xtbugtoolbat" Name="xtbugtool.bat" DiskId="1" Source="diagnostics\xtbugtool.bat" />
                 </Component>
             </Directory>
             <Directory Id="netsettings" Name='netsettings'>
@@ -236,24 +310,24 @@
 
             <Merge Id='Drivers' Language='1033' SourceFile='drivergen$(var.arch).msm' DiskId='1' />
 
-            <Component Id='dotnetfouragent' Guid='$(var.dn4id)' >
-                <Condition>
-                    <![CDATA[Installed OR (( NETFRAMEWORK4XFULL OR NETFRAMEWORK4XCLIENT ) AND NOT NETFRAMEWORKX35) ]]>
-                </Condition>
-                <File Id='XenDprivExeConfig' Name="XenDpriv.Exe.Config" Source='xenguestagent\xendpriv\XenDpriv.Exe.Config' />
-                <File Id='XenGuestAgentExeConfig' Name="XenGuestAgent.Exe.Config" Source='xenguestagent\xenguestagent\XenGuestAgent.Exe.Config' />
-				<File Id='InstallAgentExeConfig' Name="InstallAgent.exe.config" Source='InstallAgent\InstallAgent.exe.config' />
-            </Component>
             <Component Id='dotnetagentsupport' Guid='$(var.supportid)'>
-                <File Id="XenDPrivExe" Name="XenDPriv.exe" Source="xenguestagent\xendpriv\XenDPriv.exe" />
+                <File Id="XenDPrivExe" Name="$(var.FILENAME_dpriv)" Source="xenguestagent\xendpriv\XenDPriv.exe" />
+                <File Id="ManagementAgentUpdaterExe" Name="ManagementAgentUpdater.exe" Source="xenguestagent\xenupdater\ManagementAgentUpdater.exe" />
+                <File Id='XenDprivExeConfig' Name="$(var.FILENAME_dprivcfg)" Source='xenguestagent\xendpriv\XenDpriv.Exe.Config' />
+                <File Id='XenGuestAgentExeConfig' Name="$(var.FILENAME_agentcfg)" Source='xenguestagent\xenguestagent\XenGuestAgent.Exe.Config' />
+                <File Id='InstallAgentExeConfig' Name="InstallAgent.exe.config" Source='InstallAgent\InstallAgent.exe.config' />
                 <File Id="XenGuestLibDll" Name="XenGuestLib.Dll" Source="xenguestagent\xenguestagent\XenGuestLib.Dll" />
                 <File Id="InteropNetFwTypeLibdll" Name="Interop.NetFwTypeLib.dll" Source="xenguestagent\xenguestagent\Interop.NetFwTypeLib.dll" />
+                <File Id="InteropTaskSchedulerdll" Name="Interop.TaskScheduler.dll" Source="xenguestagent\xenupdater\Interop.TaskScheduler.dll" />
+                <File Id='ManagementAgentUpdaterExeConfig' Name="ManagementAgentUpdater.Exe.Config" Source='xenguestagent\xenupdater\ManagementAgentUpdater.Exe.Config' />
+                <File Id='UninstallerExeConfig' Name="Uninstall.Exe.Config" Source='Uninstall\Uninstall.exe.config' />
+                <File Id='UninstallerExe' Name="Uninstall.Exe" Source='Uninstall\Uninstall.Exe' />
             </Component>
             <Component Id='XenVssComponent' Guid='$(var.XenVssComponentGUID)'>
                  <File Id='xenvss_dll' Name="XenVss.dll" DiskId='1' Source='xenvss\$(var.arch)\xenvss.dll' KeyPath='yes' />
                  <File Id='vssclient_dll' Name="VssClient.dll" Source='xenvss\$(var.arch)\vssclient.dll' />
-                 <File Id='install_cmd' Name="install-XenProvider.cmd" Source='xenvss\install-XenProvider.cmd' />
-                 <File Id='uninstall_cmd' Name="uninstall-XenProvider.cmd" Source='xenvss\uninstall-XenProvider.cmd' />
+                 <File Id='install_cmd' Name="$(var.FILENAME_installVSS)" Source='xenvss\install-XenProvider.cmd' />
+                 <File Id='uninstall_cmd' Name="$(var.FILENAME_uninstallVSS)" Source='xenvss\uninstall-XenProvider.cmd' />
                  <File Id='regvss_vbs' Name="regvss.vbs" Source='xenvss\regvss.vbs' />
             </Component>
             <?if $(var.usecerts)=yes ?>
@@ -265,7 +339,7 @@
                 </Directory>
             <?endif?>
             <Component Id='XenService' Guid="*">
-                <File Id='XenGuestAgent.Exe' Name='XenGuestAgent.Exe' Source="xenguestagent\xenguestagent\xenguestagent.exe" />
+                <File Id='XenGuestAgent.Exe' Name='$(var.FILENAME_agent)' Source="xenguestagent\xenguestagent\xenguestagent.exe" />
                 <ServiceInstall Id='XenServiceInstaller'
                       Type='ownProcess'
                       Vital='yes'
@@ -294,7 +368,7 @@
                       Vital='yes'
                       Name='$(var.BRANDING_installAgentShort)'
                       DisplayName='$(var.Brand) $(var.Product) $(var.Install)'
-                      Description='($var.BRANDING_installAgentDesc)'
+                      Description='$(var.BRANDING_installAgentDesc)'
                       Start='auto'
                       Account='LocalSystem'
                       ErrorControl='ignore'
@@ -372,16 +446,44 @@
               Key='$(var.BRANDING_installAgentRegKey)'>
               <RegistryValue Type='string' Name='RebootOption' Value='[REBOOTOPTION]' />
           </RegistryKey>
+          <RegistryKey Root="HKLM"
+              Key='$(var.BRANDING_installAgentRegKey)'>
+              <RegistryValue Type='string' Name='InstallMode' Value='[INSTALLMODE]' />
+          </RegistryKey>
+          <RegistryKey Root="HKLM"
+              Key='$(var.BRANDING_installAgentRegKey)'>
+              <RegistryValue Type='string' Name='InstallerInitiatorSid' Value='[INITIATORSID]' />
+          </RegistryKey>
+          <RemoveRegistryKey Root="HKLM"
+              Key='$(var.BRANDING_installAgentRegKey)'
+              Action="removeOnInstall" />
+          <RemoveRegistryKey Root="HKLM"
+              Key='$(var.BRANDING_installAgentRegKey)'
+              Action="removeOnUninstall" />
+          <RemoveRegistryKey Root="HKLM"
+              Key='Software\Citrix\XenToolsInstaller'
+              Action="removeOnInstall" />
+          <RemoveRegistryKey Root="HKLM"
+              Key='Software\Citrix\XenToolsInstaller'
+              Action="removeOnUninstall" />
+      </Component>
+      <Component Id="InstallAgentReg32" Guid="47883399-450c-40a4-bf4f-55f7a1515877">
+          <RemoveRegistryKey Root="HKLM"
+              Key='Software\Wow6432Node\Citrix\XenToolsInstaller'
+              Action="removeOnInstall" />
+          <RemoveRegistryKey Root="HKLM"
+              Key='Software\Wow6432Node\Citrix\XenToolsInstaller'
+              Action="removeOnUninstall" />
       </Component>
 
     </Directory>
       
       
     <Feature Id='Complete' Level='1'>
+        <ComponentRef Id="xtbugtool" />
         <?if $(var.usecerts)=yes ?>
             <ComponentRef Id='Certs' />
         <?endif?>
-        <ComponentRef Id='dotnetfouragent'/>
         <ComponentRef Id='dotnetagentsupport'/>
         <MergeRef Id='Drivers' />
         <ComponentRef Id='NetSettingsCpy' />
@@ -399,6 +501,7 @@
         <ComponentRef Id="DifXAPIDLL32"/>
         <?if $(sys.BUILDARCH)=x64 ?>
             <ComponentRef Id='RegEntry32'/>
+            <ComponentRef Id="InstallAgentReg32" />
         <?endif ?>
         <ComponentRef Id='InstallAgentReg'/>
         <ComponentRef Id='InstallService' />
@@ -406,7 +509,7 @@
     <?if $(sys.BUILDARCH)=x86 ?>
         <Feature Id="NotUsed" Level='0'>
             <ComponentRef Id='RegEntry32'/>
-         <ComponentRef Id='InstallService' /> 
+            <ComponentRef Id="InstallAgentReg32" />
         </Feature>
     <?endif ?>
   </Product>

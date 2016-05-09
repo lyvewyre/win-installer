@@ -1,10 +1,11 @@
-﻿using PInvokeWrap;
+﻿using Microsoft.Win32;
+using PInvokeWrap;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography.X509Certificates;
-using System.ServiceProcess;
 using System.Text;
 using System.Threading;
 
@@ -12,6 +13,10 @@ namespace HelperFunctions
 {
     public static class Helpers
     {
+        public const string HKLM = @"HKEY_LOCAL_MACHINE\";
+        public const string REGISTRY_SERVICES_KEY =
+            @"SYSTEM\CurrentControlSet\Services\";
+
         public static void Reboot()
         {
             Trace.WriteLine("OK - shutting down");
@@ -112,9 +117,19 @@ namespace HelperFunctions
             return (int)Math.Log((double)flag, 2.0);
         }
 
+        public enum ExpandedServiceStartMode : uint {
+            // Contains service start modes for drivers and user services
+            Boot        = 0,
+            System      = 1,
+            Automatic   = 2,
+            Manual      = 3, //User Services
+            Demand      = 3, //Drivers
+            Disabled    = 4,
+        }
+
         public static bool ChangeServiceStartMode(
             string serviceName,
-            ServiceStartMode mode)
+            ExpandedServiceStartMode mode)
         {
             Trace.WriteLine(
                 "Changing Start Mode of service: \'" + serviceName + "\'"
@@ -174,6 +189,52 @@ namespace HelperFunctions
             return true;
         }
 
+        public static void EnsureBootStartServicesStartAtBoot()
+        // This is a function which at first glance appears pointless
+        // It runs through all of our services registry entries, and
+        // if it finds they are boot start, it changes their start mode
+        // to be boot start.
+        // The Reason:  If we move xenbus to be non-boot start,
+        // then reinstall the same version of xenbus, it will become boot
+        // start.  But other boot start drivers hanging off it seem to become
+        // forgotten by Windows.  This function reminds Windows about them.
+        {
+            string[] services = {
+                "xenbus", "xendisk", "xenvbd", "xenvif", "xennet", "xeniface",
+            };
+
+            foreach (string service in services) 
+            {
+                try
+                {
+                    if ((Int32)Registry.GetValue(
+                            HKLM + REGISTRY_SERVICES_KEY + service,
+                            "start",
+                            4
+                        ) == (Int32)ExpandedServiceStartMode.Boot)
+                    {
+                        Trace.WriteLine(
+                            "ensure service \'" + service + "\' is boot start"
+                        );
+
+                        ChangeServiceStartMode(
+                            service,
+                            ExpandedServiceStartMode.Boot
+                        );
+                    }
+                }
+                catch
+                // We fall here if the service does
+                // not exist in the registry
+                {
+                    Trace.WriteLine(
+                        "Unable to ensure service \'" +
+                        service + "\' is boot start"
+                    );
+                }
+            }
+        }
+
         public static bool DeleteService(string serviceName)
         // Marks the specified service for deletion from
         // the service control manager database
@@ -230,14 +291,14 @@ namespace HelperFunctions
         public static bool BlockUntilNoDriversInstalling(uint timeout)
         // Returns true, if no drivers are installing before the timeout
         // is reached. Returns false, if timeout is reached. To block
-        // until no drivers are installing pass PInvoke.CfgMgr32.INFINITE
+        // until no drivers are installing pass PInvoke.Winbase.INFINITE
         // 'timeout' is counted in seconds.
         {
-            CfgMgr32.Wait result;
+            Winbase.WAIT result;
 
             Trace.WriteLine("Checking if drivers are currently installing");
 
-            if (timeout != CfgMgr32.INFINITE)
+            if (timeout != Winbase.INFINITE)
             {
                 Trace.WriteLine("Blocking for " + timeout + " seconds..");
                 timeout *= 1000;
@@ -251,18 +312,62 @@ namespace HelperFunctions
                 timeout
             );
 
-            if (result == CfgMgr32.Wait.OBJECT_0)
+            if (result == Winbase.WAIT.OBJECT_0)
             {
                 Trace.WriteLine("No drivers installing");
                 return true;
             }
-            else if (result == CfgMgr32.Wait.FAILED)
+            else if (result == Winbase.WAIT.FAILED)
             {
                 Win32Error.Set("CMP_WaitNoPendingInstallEvents");
                 throw new Exception(Win32Error.GetFullErrMsg());
             }
 
             Trace.WriteLine("Timeout reached - drivers still installing");
+            return false;
+        }
+
+        public static bool BlockUntilMsiMutexAvailable(TimeSpan timeout)
+        // Returns 'true', if it can get hold of '_MSIExecute' mutex
+        // before the timeout is reached, 'false' otherwise
+        {
+            Mutex msiExecuteMutex;
+
+            Trace.WriteLine("Checking if MSI mutex is available");
+
+            try
+            {
+                msiExecuteMutex = Mutex.OpenExisting(@"Global\_MSIExecute");
+            }
+            catch (WaitHandleCannotBeOpenedException)
+            // Mutex not set
+            {
+                Trace.WriteLine("MSI mutex doesn't exist");
+                return true;
+            }
+
+            if (timeout.Equals(TimeSpan.Zero))
+            {
+                Trace.WriteLine(
+                    "Blocking indefinitely, until getting hold of MSI mutex"
+                );
+            }
+            else
+            {
+                Trace.WriteLine(
+                    "Blocking for \'" + timeout.ToString() + "\'"
+                );
+            }
+
+            if (msiExecuteMutex.WaitOne(timeout, false))
+            // Received signal; got mutex
+            {
+                Trace.WriteLine("MSI mutex is available");
+                msiExecuteMutex.ReleaseMutex();
+                return true;
+            }
+
+            Trace.WriteLine("Timeout reached; unable to obtain MSI mutex");
             return false;
         }
 
@@ -282,9 +387,9 @@ namespace HelperFunctions
                 "Checking if \'" + msiName + "\' is present in system.."
             );
 
-            // ERROR_SUCCESS = 0
             for (int i = 0;
-                 (err = Msi.MsiEnumProducts(i, productCode)) == 0;
+                 (err = Msi.MsiEnumProducts(i, productCode)) ==
+                    WinError.ERROR_SUCCESS;
                  ++i)
             {
                 len = BUF_LEN;
@@ -297,7 +402,7 @@ namespace HelperFunctions
                     ref len
                 );
 
-                if (err != 0)
+                if (err != WinError.ERROR_SUCCESS)
                 {
                     Win32Error.Set("MsiGetProductInfo", err);
                     throw new Exception(Win32Error.GetFullErrMsg());
@@ -315,7 +420,7 @@ namespace HelperFunctions
                 }
             }
 
-            if (err == 259) // ERROR_NO_MORE_ITEMS
+            if (err == WinError.ERROR_NO_MORE_ITEMS)
             {
                 Trace.WriteLine("Product not found");
                 return "";
@@ -418,32 +523,29 @@ namespace HelperFunctions
                 using (Process proc = Process.Start(startInfo))
                 {
                     proc.WaitForExit();
+                    Win32Error.Set(proc.ExitCode);
 
                     switch (proc.ExitCode)
                     {
-                    case 0:
-                        Trace.WriteLine("ERROR_SUCCESS");
-                        return;
-                    case 1641:
-                        Trace.WriteLine("ERROR_SUCCESS_REBOOT_INITIATED");
-                        return;
-                    case 3010:
-                        Trace.WriteLine("ERROR_SUCCESS_REBOOT_REQUIRED");
+                    case WinError.ERROR_SUCCESS:
+                    case WinError.ERROR_SUCCESS_REBOOT_INITIATED:
+                    case WinError.ERROR_SUCCESS_REBOOT_REQUIRED:
+                        Trace.WriteLine(Win32Error.GetFullErrMsg());
                         return;
                     default:
                         if (i == tries - 1)
                         {
                             throw new Exception(
-                                "Tries exhausted; Error: " +
-                                proc.ExitCode
+                                "Tries exhausted; " +
+                                Win32Error.GetFullErrMsg()
                             );
                         }
 
                         secs = (int)Math.Pow(2.0, (double)i);
 
                         Trace.WriteLine(
-                            "Msi uninstall failed; Error: " +
-                            proc.ExitCode
+                            "Msi uninstall failed; " +
+                            Win32Error.GetFullErrMsg()
                         );
                         Trace.WriteLine(
                             "Retrying in " +
@@ -497,13 +599,135 @@ namespace HelperFunctions
                     out needreboot
                 );
 
-                if (err != 0) // ERROR_SUCCESS
+                if (err != WinError.ERROR_SUCCESS)
                 {
                     Win32Error.Set("DriverPackageUninstall", err);
                     throw new Exception(Win32Error.GetFullErrMsg());
                 }
 
                 Trace.WriteLine("Uninstalled");
+            }
+        }
+
+        public static WtsApi32.WTS_SESSION_INFO[] GetWTSSessions(IntPtr server)
+        {
+            List<WtsApi32.WTS_SESSION_INFO> ret =
+                new List<WtsApi32.WTS_SESSION_INFO>();
+            int structSize = Marshal.SizeOf(typeof(WtsApi32.WTS_SESSION_INFO));
+
+            IntPtr ppSessionInfo;
+            uint count;
+
+            if (!WtsApi32.WTSEnumerateSessions(
+                    server,
+                    0,
+                    1,
+                    out ppSessionInfo,
+                    out count))
+            {
+                Win32Error.Set("WTSEnumerateSessions");
+                throw new Exception(Win32Error.GetFullErrMsg());
+            }
+
+            IntPtr element = ppSessionInfo;
+
+            for (uint i = 0; i < count; ++i)
+            {
+                ret.Add(
+                    (WtsApi32.WTS_SESSION_INFO)Marshal.PtrToStructure(
+                        element,
+                        typeof(WtsApi32.WTS_SESSION_INFO)
+                    )
+                );
+
+                element = (IntPtr)((Int64)element + structSize);
+            }
+
+            WtsApi32.WTSFreeMemory(ppSessionInfo);
+
+            return ret.ToArray();
+        }
+
+        public static string GetUserSidFromSessionId(ulong sessionId)
+        // Gets the unique Security Identifier (SID)
+        // of the User logged on to 'sessionId'
+        {
+            IntPtr token       = IntPtr.Zero;
+            IntPtr tokenInf    = IntPtr.Zero;
+            uint   tokenInfLen = 0;
+            IntPtr szSid       = IntPtr.Zero;
+            string sid;
+
+            try
+            {
+                if (!WtsApi32.WTSQueryUserToken(sessionId, out token))
+                {
+                    Win32Error.Set("WTSQueryUserToken");
+                    throw new Exception(Win32Error.GetFullErrMsg());
+                }
+
+                // Get tokenInfLen
+                AdvApi32.GetTokenInformation(
+                    token,
+                    AdvApi32.TOKEN_INFORMATION_CLASS.TokenUser,
+                    tokenInf,
+                    tokenInfLen,
+                    out tokenInfLen
+                );
+
+                Win32Error.Set("GetTokenInformation");
+
+                if (Win32Error.GetErrorNo() !=
+                    WinError.ERROR_INSUFFICIENT_BUFFER)
+                {
+                    throw new Exception(Win32Error.GetFullErrMsg());
+                }
+
+                tokenInf = Marshal.AllocHGlobal((int)tokenInfLen);
+
+                if (!AdvApi32.GetTokenInformation(
+                        token,
+                        AdvApi32.TOKEN_INFORMATION_CLASS.TokenUser,
+                        tokenInf,
+                        tokenInfLen,
+                        out tokenInfLen))
+                {
+                    Win32Error.Set("GetTokenInformation");
+                    throw new Exception(Win32Error.GetFullErrMsg());
+                }
+
+                AdvApi32.TOKEN_USER tokenUser =
+                    (AdvApi32.TOKEN_USER)Marshal.PtrToStructure(
+                        tokenInf,
+                        typeof(AdvApi32.TOKEN_USER)
+                    );
+
+                if (!AdvApi32.ConvertSidToStringSid(
+                        tokenUser.User.Sid,
+                        out szSid))
+                {
+                    Win32Error.Set("ConvertSidToStringSid");
+                    throw new Exception(Win32Error.GetFullErrMsg());
+                }
+
+                sid = Marshal.PtrToStringAuto(szSid);
+
+                return sid;
+            }
+            finally
+            {
+                if (szSid != IntPtr.Zero)
+                {
+                    Kernel32.LocalFree(szSid);
+                }
+                if (tokenInf != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(tokenInf);
+                }
+                if (token != IntPtr.Zero)
+                {
+                    Kernel32.CloseHandle(token);
+                }
             }
         }
     }

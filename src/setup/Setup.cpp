@@ -33,7 +33,10 @@
 #include "shellapi.h"
 #include "shlobj.h"
 #include "shlwapi.h"
-#include "branding.h"
+#include "stdint.h"
+#include <windows.h>
+#include "setupapi.h"
+#include "Sddl.h"
 
 TCHAR * _vatallocprintf(const TCHAR *format, va_list args)
 {
@@ -57,6 +60,10 @@ TCHAR * _tallocprintf(const TCHAR *format, ...)
 	return space;
 }
 
+
+
+#include "brandcontrol.h"
+
 void ErrMsg(const TCHAR *format, ...)
 {
 	va_list args;
@@ -67,7 +74,7 @@ void ErrMsg(const TCHAR *format, ...)
 		goto fail1;
 
 	va_end(args);
-	MessageBox(NULL, space, _T("XenServer Setup.exe error"), MB_OK);
+	MessageBox(NULL, space, getBrandingString(BRANDING_setupErr), MB_OK);
 	free(space);
 	return;
 fail1:
@@ -84,7 +91,7 @@ bool runProcess(TCHAR* cmdLine, DWORD* exitcode)
 	OutputDebugString(cmdLine);
 
 	if (!CreateProcess(NULL, cmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-		ErrMsg(_T("Failed to create process %s %x"),cmdLine, GetLastError());
+		ErrMsg(getBrandingString(BRANDING_processFail),cmdLine, GetLastError());
 		return false;
 	}
 
@@ -103,22 +110,16 @@ typedef struct {
 	bool legacy;
 } arguments;
 
+
+
 bool parseCommandLine(arguments* args)
 {
 	
-	// Check OS
-	OSVERSIONINFO versionInfo;
-	versionInfo.dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
-	if (GetVersionEx(&versionInfo)) {
-		if (versionInfo.dwMajorVersion < 6) {
-			args->legacy=true;
-		}
-	}
-
-	int argCount;
-	LPWSTR *szArgList = CommandLineToArgvW(GetCommandLineW(), &argCount);
 	memset(args, 0, sizeof(arguments));
 
+	int argCount;
+	LPWSTR cli = GetCommandLineW();
+	LPWSTR *szArgList = CommandLineToArgvW(cli, &argCount);
 	for (int i=1; i<argCount ; i++) {
 		if (!wcsncmp(szArgList[i],L"/TEST",sizeof(L"/TEST"))) {
 			args->test = true;
@@ -136,75 +137,69 @@ bool parseCommandLine(arguments* args)
 			args->forcerestart = true;
 		}
 		else {
-			ErrMsg(_T("Valid arguments are:\n /TEST\n/passive\n/quiet\n/norestart\n/forcerestart"));
+			ErrMsg(getBrandingString(BRANDING_setupHelp));
 			return false;
 		}
 	}
+
 	return true;
 }
 
 
-TCHAR* ma64 = _T(FILENAME_managementx64);
-TCHAR* ma32 = _T(FILENAME_managementx86);
-TCHAR* iw = _T("installwizard.msi");
+const TCHAR* ma64 = getBrandingString(FILENAME_managementx64);
+const TCHAR* ma32 = getBrandingString(FILENAME_managementx86);
+const TCHAR* iw = _T("installwizard.msi");
 	
-TCHAR* xenlegacy = _T(FILENAME_legacy);
-TCHAR* uninstallerfix = _T(FILENAME_legacyuninstallerfix);
+const TCHAR* xenlegacy = getBrandingString(FILENAME_legacy);
+const TCHAR* uninstallerfix = getBrandingString(FILENAME_legacyuninstallerfix);
+const TCHAR* INSTALL_AGENT_REG_KEY = getBrandingString(BRANDING_installAgentRegKey);
 
 TCHAR sysdir[MAX_PATH];
 TCHAR workfile[MAX_PATH];
 TCHAR logfile[MAX_PATH];
 TCHAR* msiexec;
 
+
+
 int getFileLocations()
 {
 	if (!GetSystemDirectory(sysdir, MAX_PATH)) {
-		ErrMsg(_T("Unable to read system directory"));
+		ErrMsg(getBrandingString(BRANDING_noSystemDir));
 		return 0;
 	}
 
 	msiexec = _tallocprintf(_T("%s\\msiexec.exe"), sysdir);
 	if ( msiexec == NULL) {
-		ErrMsg(_T("Insufficient memory to allocate msiexec string"));
+		ErrMsg(getBrandingString(BRANDING_errMSINoMem));
 		return 0;
 	}
 
 	
 	if (GetModuleFileName(NULL, workfile, MAX_PATH)>=MAX_PATH) {
-		ErrMsg(_T("Insufficient memory to get file path"));
+		ErrMsg(getBrandingString(BRANDING_errFilePathNoMem));
 		return 0;
 	}
 	PathRemoveFileSpec(workfile);
 
 
 	if (SUCCEEDED(SHGetFolderPath(NULL, CSIDL_COMMON_APPDATA | CSIDL_FLAG_CREATE, NULL, 0 , logfile))) {
-		PathAppend(logfile, _T("Citrix"));
+		PathAppend(logfile, (TCHAR *)getBrandingString(BRANDING_manufacturer));
 		CreateDirectory(logfile, NULL);
-		PathAppend(logfile, _T("XSToolSetup"));
+		PathAppend(logfile, getBrandingString(BRANDING_setupLogDir));
 		CreateDirectory(logfile, NULL);
 		PathAppend(logfile,_T("Install.log"));
 	}
 	else {
-		ErrMsg(_T("Can't get logging path"));
+		ErrMsg(getBrandingString(BRANDING_errNoLogPath));
 		return 0;
 	}
 	return 1;
 }
 
-DWORD installLegacy(arguments *args) {
-	DWORD exitcode;
-	TCHAR* cmd = _tallocprintf(_T("%s\\%s /S"), workfile, uninstallerfix);
-	runProcess(cmd, &exitcode);
-	free(cmd);
-	cmd = _tallocprintf(_T("%s\\%s%s"), workfile, xenlegacy, 
-		(args->passive||args->quiet)?" /S":"");
-	runProcess(cmd, &exitcode);
-	return exitcode;
-}
 
-TCHAR* getInstallMsiName(arguments* args)
+const TCHAR* getInstallMsiName(arguments* args)
 {
-	if (args->test) {
+	if (!args->test) {
 		BOOL wow64;
 		if (IsWow64Process(GetCurrentProcess(), &wow64)) {
 			if (wow64) {
@@ -219,6 +214,7 @@ TCHAR* getInstallMsiName(arguments* args)
 		}
 	}
 	else {
+		args->forcerestart = false;  //Hack because old installer doesn't like forcereboot
 		return iw;
 	}
 }
@@ -227,7 +223,7 @@ DWORD installMsi(arguments* args)
 {
 	DWORD exitcode;
 
-	TCHAR* installname = getInstallMsiName(args);
+	const TCHAR* installname = getInstallMsiName(args);
 	TCHAR* cmdline = _tallocprintf(_T("\"%s\" /i\"%s\\%s\"%s%s /liwearucmopvx+! \"%s\""),
 		msiexec,
 		workfile,
@@ -236,19 +232,126 @@ DWORD installMsi(arguments* args)
 		( args->norestart?_T(" /norestart"):(args->forcerestart?_T(" /forcerestart"):_T(""))),
 		logfile);
 	if (cmdline == NULL) {
-		ErrMsg(_T("Insufficient memory to allocate cmdline string"));
+		ErrMsg(getBrandingString(BRANDING_errCmdLineNoMem));
 		return 0;
 	}
 
 	runProcess(cmdline, &exitcode);
 
-	if (exitcode != 0) {
-		ErrMsg(_T("The MSI Install failed with exit code %d\nSee %s for more details"), exitcode, logfile);
-	}
-
 	return exitcode;
 }
 
+/*
+ * WARNING: Call this function ONLY BEFORE installMsi()
+ *          (and preferably save the value for later use)
+ */
+BOOL Installing(void)
+{
+	HKEY regKey;
+
+	if (RegOpenKeyEx(
+			HKEY_LOCAL_MACHINE,
+			INSTALL_AGENT_REG_KEY,
+			0,
+			KEY_READ | KEY_WOW64_64KEY,
+			&regKey) != ERROR_SUCCESS) {
+		RegCloseKey(regKey);
+		return TRUE; /* installing */
+	} else {
+		return FALSE; /* uninstalling */
+	}
+
+}
+
+void waitForStatus() {
+	HKEY  insAgntKey;
+	HKEY  vmStateKey;
+	TCHAR status[256];
+	DWORD statusSize = 256;
+	DWORD pvToolsOnFirstRun;
+	DWORD pvToolsVerSize = sizeof(pvToolsOnFirstRun);
+
+	TCHAR *VM_STATE_REG_KEY = _tallocprintf(
+		_T("%s\\%s"),
+		INSTALL_AGENT_REG_KEY,
+		_T("VMState")
+	);
+
+	if (VM_STATE_REG_KEY == NULL) {
+		goto fail1;
+	}
+
+	if (RegOpenKeyEx(
+			HKEY_LOCAL_MACHINE,
+			INSTALL_AGENT_REG_KEY,
+			0,
+			KEY_READ | KEY_WOW64_64KEY,
+			&insAgntKey) != ERROR_SUCCESS) {
+		goto fail2;
+	}
+
+	if (RegOpenKeyEx(
+			HKEY_LOCAL_MACHINE,
+			VM_STATE_REG_KEY,
+			0,
+			KEY_READ | KEY_WOW64_64KEY,
+			&vmStateKey) != ERROR_SUCCESS) {
+		goto fail3;
+	}
+
+	/*
+	 * Gets populated in
+	 * InstallAgent static ctor => State.VM static ctor
+	 */
+	if (RegQueryValueEx(
+			vmStateKey,
+			_T("PVToolsVersionOnFirstRun"),
+			NULL,
+			NULL,
+			(LPBYTE)&pvToolsOnFirstRun,
+			&pvToolsVerSize) != ERROR_SUCCESS) {
+		goto fail4;
+	}
+
+	for(;;) {
+		if (RegQueryValueEx(
+				insAgntKey,
+				_T("InstallStatus"),
+				NULL,
+				NULL,
+				(LPBYTE)status,
+				&statusSize) != ERROR_SUCCESS ||
+		    _tcsicmp(status, _T("Installing")) == 0) {
+			goto needcontinue;
+		}
+
+		if (_tcsicmp(status, _T("NeedsReboot")) == 0) {
+			/*
+			 * If PV drivers other than the latest
+			 * (currently 8.x) are found, we should prompt
+			 * for reboot after removing them from
+			 * filters and disabling their bootstart
+			 */
+			if (pvToolsOnFirstRun == 7) {
+				SetupPromptReboot(NULL, NULL, FALSE);
+			}
+			goto done;
+		}
+
+needcontinue:
+		SleepEx(2000, TRUE);
+		continue;
+done:
+fail4:
+		RegCloseKey(vmStateKey);
+fail3:
+		RegCloseKey(insAgntKey);
+fail2:
+		free(VM_STATE_REG_KEY);
+fail1:
+		return;
+	}
+}
 
 #define dotnet4 _T("Software\\Microsoft\\NET Framework Setup\\NDP\\v4\\Client")
 #define dotnet35 _T("Software\\Microsoft\\NET Framework Setup\\NDP\\v3.5")
@@ -283,7 +386,7 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 {
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(lpCmdLine);
-
+	DWORD msiResult;
 
 	// Parse command line
 	// Acceptable options:
@@ -295,13 +398,15 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 
 	arguments args;
 
+	BOOL installing = Installing();
+
 	if (!parseCommandLine(&args))
 		return 0;
 
 	// We require .net to run
 
 	if (!checkDotNet()) {
-		ErrMsg(_T("Microsoft .Net Framework 3.5 or higher is required"));
+		ErrMsg(getBrandingString(BRANDING_errDotNetNeeded));
 		return 0;
 	}
 
@@ -311,13 +416,23 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
 		return 0;
 	}
 
-	// Get legacy OS support out of the way
+	msiResult = installMsi(&args);
 
-	if (args.legacy) {
-		return installLegacy(&args);
+	if (msiResult != ERROR_SUCCESS &&
+			msiResult != ERROR_SUCCESS_REBOOT_INITIATED &&
+			msiResult != ERROR_SUCCESS_REBOOT_REQUIRED) {
+		ErrMsg(
+			getBrandingString(BRANDING_errMSIInstallFail),
+			msiResult,
+			logfile
+		);
+		return msiResult;
+	}
+	
+	if (installing) {
+		waitForStatus();
 	}
 
-	return installMsi(&args);
-	
+	return 0;
 }
 

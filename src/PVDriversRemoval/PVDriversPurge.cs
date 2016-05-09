@@ -19,26 +19,31 @@ namespace PVDriversRemoval
         private static readonly string[] pvHwIds = {
             @"XENVIF\VEN_XS0001&DEV_NET",
             @"XENVIF\VEN_XS0002&DEV_NET",
+            @"XENVIF\VEN_XSC000&DEV_NET",
             @"XENVIF\DEVICE",
 
             @"XENBUS\VEN_XS0001&DEV_VIF",
             @"XENBUS\VEN_XS0002&DEV_VIF",
+            @"XENBUS\VEN_XSC000&DEV_VIF",
             @"XEN\VIF",
             @"XENBUS\CLASS&VIF",
             @"XENBUS\CLASS_VIF",
 
             @"XENBUS\VEN_XS0001&DEV_VBD",
             @"XENBUS\VEN_XS0002&DEV_VBD",
+            @"XENBUS\VEN_XSC000&DEV_VBD",
             @"XENBUS\CLASS&VBD",
             @"XENBUS\CLASS_VBD",
 
             @"XENBUS\VEN_XS0001&DEV_IFACE",
             @"XENBUS\VEN_XS0002&DEV_IFACE",
+            @"XENBUS\VEN_XSC000&DEV_IFACE",
             @"XENBUS\CLASS&IFACE",
             @"XENBUS\CLASS_IFACE",
 
             @"PCI\VEN_5853&DEV_0001",
             @"PCI\VEN_5853&DEV_0002",
+            @"PCI\VEN_5853&DEV_C000",
             @"PCI\VEN_fffd&DEV_0101",
 
             @"ROOT\XENEVTCHN"
@@ -119,16 +124,17 @@ namespace PVDriversRemoval
         public static void DontBootStartPVDrivers()
         {
             const string FUNC_NAME = "DontBootStartPVDrivers";
-            const string BASE_RK_NAME =
-                @"SYSTEM\CurrentControlSet\Services";
+            const string BASE_RK_NAME = Helpers.REGISTRY_SERVICES_KEY;
             const string START = "Start";
             const string XENFILT_UNPLUG = @"xenfilt\Unplug";
+            const string XENEVTCHN = "xenevtchn";
+            const string NOPVBOOT = "NoPVBoot";
             const int MANUAL = 3;
 
             string[] xenServices = {
                 "XENBUS", "xenfilt", "xeniface", "xenlite",
                 "xennet", "xenvbd", "xenvif", "xennet6",
-                "xenutil", "xenevtchn"
+                "xenutil", XENEVTCHN
             };
 
             Trace.WriteLine("===> " + FUNC_NAME);
@@ -166,6 +172,17 @@ namespace PVDriversRemoval
                     );
                     tmpRK.DeleteValue("DISKS", false);
                     tmpRK.DeleteValue("NICS", false);
+                }
+            }
+
+            using (RegistryKey tmpRK = baseRK.OpenSubKey(XENEVTCHN, true))
+            {
+                if (tmpRK != null)
+                // If this is not set, the VM BSODs at
+                // boot time (only on legacy drivers)
+                {
+                    tmpRK.SetValue(NOPVBOOT, 1, RegistryValueKind.DWord);
+                    Trace.WriteLine(XENEVTCHN + @"\" + NOPVBOOT + " = 1");
                 }
             }
 
